@@ -104,9 +104,12 @@ class SQLiteRepository:
         return [self._entity_from_row(row) for row in rows]
 
     def find_entities(self, kind, field, value):
+        entities = self.list_entities(kind=kind)
+        if value is None:
+            return entities
         return [
             entity
-            for entity in self.list_entities(kind=kind)
+            for entity in entities
             if (entity["id"] == value if field == "id" else entity["data"].get(field) == value)
         ]
 

@@ -2,7 +2,7 @@ from uuid import uuid4
 
 from .audit import AuditTrail
 from .domain import ConflictError, NotFoundError
-from .rules import RuleEngine
+from .rules import RuleEngine, disposal_summary as summarize_disposal
 
 
 class DomainService:
@@ -68,6 +68,10 @@ class DomainService:
         if kind:
             kind = self.rules.normalize_kind(kind)
         return self.repository.list_entities(kind=kind, status=status)
+
+    def disposal_summary(self):
+        orders = self.repository.list_entities(kind="disposal_order")
+        return summarize_disposal(orders)
 
     def audit_log(self, entity_id=None):
         return self.repository.list_audit(entity_id=entity_id)

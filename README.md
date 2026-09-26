@@ -25,14 +25,16 @@ python3 app.py --db ./data.db --port 8306
 ## 核心对象
 
 - `consignment`：检疫批次；`facility`：温室、苗圃或下游种植点。
+- `disposal_order`：隔离处置单。管理员一次登记多个阳性批次，每条记录包含`consignment_id`（批次）、`bay_id`（棚位）、`disinfection`（消杀方式）与`recheck_date`（复查日期）。任一批次的棚位已被占用（含同单内重复分配）则整张单不保存，错误信息指出冲突批次；批次在单内状态为`occupied`（隔离中）/`released`（复查合格已释放）/`pending`（复查不合格回到待处置），全部处理完后处置单进入`completed`。旧批次没有隔离信息不影响按原清单查询`consignment`。
 
 ## 主要接口
 
 - `GET /health`：健康检查。
 - `GET /api/<kind>`：按对象类型查询，可用`?status=`过滤。
-- `POST /api/<kind>`：创建对象；请求体为JSON。
+- `POST /api/<kind>`：创建对象；请求体为JSON。携带`Idempotency-Key`请求头时，同一处置单重发返回第一次保存的结果。
 - `GET /api/entities/<id>`：读取对象当前版本。
-- `POST /api/entities/<id>/actions`：提交`{"action":"动作名","data":{...},"expected_version":数字}`。
+- `POST /api/entities/<id>/actions`：提交`{"action":"动作名","data":{...},"expected_version":数字}`。处置单复查用`recheck`，`data`为`{"results":[{"consignment_id":"批次","passed":true}]}`，可只提交部分批次。
+- `GET /api/disposal_summary`：各棚位占用、待复查批次数量和处置记录汇总。
 - `GET /api/audit`：读取审计记录。
 
 请求身份通过`X-User-Id`和`X-Role`请求头传入。创建和动作的可执行角色由规则引擎控制。

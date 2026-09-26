@@ -6,29 +6,84 @@
   <title>植物病虫害检疫与传播追溯</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #1f2937; }
-    main { max-width: 820px; margin: auto; }
+    main { max-width: 880px; margin: auto; }
     pre { background: #f3f4f6; padding: 1rem; border-radius: 8px; overflow-x: auto; }
     button { padding: .5rem .8rem; cursor: pointer; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 1.5rem; }
+    th, td { border: 1px solid #d1d5db; padding: .4rem .6rem; text-align: left; font-size: .95rem; }
+    th { background: #f3f4f6; }
+    .occupied { color: #b91c1c; font-weight: 600; }
+    .free { color: #15803d; }
+    .overdue { background: #fee2e2; }
+    .badge { display: inline-block; padding: .1rem .5rem; border-radius: 999px; background: #e5e7eb; font-size: .85rem; }
   </style>
 </head>
 <body>
 <main>
   <h1>植物病虫害检疫与传播追溯</h1>
-  <p>这是最小演示页面。使用浏览器或 curl 调用 JSON API。</p>
-  <p><button onclick="checkHealth()">检查服务状态</button></p>
+  <p><button onclick="checkHealth()">检查服务状态</button> <button onclick="loadDashboard()">刷新看板</button></p>
   <pre id="result">等待操作</pre>
+
+  <h2>隔离处置看板</h2>
+  <p>待复查批次数量：<strong id="pendingCount">-</strong></p>
+
+  <h3>棚位占用</h3>
+  <table>
+    <thead><tr><th>棚位</th><th>状态</th><th>隔离批次</th><th>复查日期</th><th>处置单</th></tr></thead>
+    <tbody id="bayBody"><tr><td colspan="5">加载中…</td></tr></tbody>
+  </table>
+
+  <h3>处置记录</h3>
+  <div id="orderList">加载中…</div>
+
   <h2>常用接口</h2>
   <pre>GET  /health
 GET  /api/&lt;kind&gt;
 POST /api/&lt;kind&gt;
 GET  /api/entities/&lt;id&gt;
-POST /api/entities/&lt;id&gt;/actions</pre>
+POST /api/entities/&lt;id&gt;/actions
+GET  /api/disposal_summary</pre>
 </main>
 <script>
+const ITEM_STATUS = {occupied: '隔离中', released: '合格已释放', pending: '待处置'};
+const ORDER_STATUS = {active: '处置中', completed: '已完成'};
+
+function esc(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g,
+    ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+}
+
 async function checkHealth() {
   const response = await fetch('/health');
   document.getElementById('result').textContent = JSON.stringify(await response.json(), null, 2);
 }
+
+async function loadDashboard() {
+  const response = await fetch('/api/disposal_summary');
+  const summary = await response.json();
+  document.getElementById('pendingCount').textContent = summary.pending_recheck;
+  const today = new Date().toISOString().slice(0, 10);
+  const bayRows = summary.bays.map(bay => {
+    const overdue = bay.occupied && bay.recheck_date && bay.recheck_date < today;
+    return '<tr class="' + (overdue ? 'overdue' : '') + '"><td>' + esc(bay.bay_id) + '</td>' +
+      '<td class="' + (bay.occupied ? 'occupied' : 'free') + '">' + (bay.occupied ? '占用中' : '空闲') + '</td>' +
+      '<td>' + esc(bay.consignment_id || '-') + '</td><td>' + esc(bay.recheck_date || '-') + '</td>' +
+      '<td>' + esc(bay.order_id ? bay.order_id.slice(0, 8) : '-') + '</td></tr>';
+  }).join('');
+  document.getElementById('bayBody').innerHTML = bayRows || '<tr><td colspan="5">暂无棚位记录</td></tr>';
+  document.getElementById('orderList').innerHTML = summary.orders.map(order => {
+    const items = (order.data.items || []).map(item =>
+      '<tr><td>' + esc(item.consignment_id) + '</td><td>' + esc(item.bay_id) + '</td><td>' +
+      esc(item.disinfection) + '</td><td>' + esc(item.recheck_date) + '</td><td>' +
+      esc(ITEM_STATUS[item.status] || item.status) + '</td></tr>').join('');
+    return '<p><span class="badge">' + esc(ORDER_STATUS[order.status] || order.status) + '</span> ' +
+      '处置单 <code>' + esc(order.id) + '</code>（登记人 ' + esc(order.created_by) + '，' + esc(order.created_at) + '）</p>' +
+      '<table><thead><tr><th>批次</th><th>棚位</th><th>消杀方式</th><th>复查日期</th><th>状态</th></tr></thead>' +
+      '<tbody>' + items + '</tbody></table>';
+  }).join('') || '<p>暂无处置记录</p>';
+}
+
+loadDashboard();
 </script>
 </body>
 </html>
