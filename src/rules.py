@@ -27,6 +27,111 @@ def _validate_release(actor, entity, data, lookup):
     return {"released_by": actor.user_id}
 
 
+ISOLATION_ITEM_FIELDS = ("consignment_id", "bay", "disinfection", "recheck_date")
+
+
+def _validate_isolation_order(actor, data, lookup):
+    items = data.get("items")
+    if not isinstance(items, list) or not items:
+        raise ValidationError("items must be a non-empty list")
+    normalized = []
+    bay_holders = {}
+    consignment_bays = {}
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValidationError("each item must be an object")
+        for field in ISOLATION_ITEM_FIELDS:
+            if item.get(field) is None or item.get(field) == "":
+                raise ValidationError("missing required field: items." + field)
+        try:
+            _date_ordinal(item["recheck_date"])
+        except (TypeError, ValueError):
+            raise ValidationError("items.recheck_date must be an ISO date")
+        consignment = _find_one(lookup, "consignment", "id", item["consignment_id"])
+        if not consignment:
+            raise ValidationError("unknown consignment: " + str(item["consignment_id"]))
+        if consignment["status"] != "quarantined":
+            raise ValidationError(
+                "consignment %s is not a quarantined positive batch"
+                % item["consignment_id"]
+            )
+        entry = dict(item)
+        entry["state"] = "isolating"
+        normalized.append(entry)
+        bay_holders.setdefault(item["bay"], []).append(item["consignment_id"])
+        consignment_bays.setdefault(item["consignment_id"], []).append(item["bay"])
+    conflicts = []
+    for bay, holders in bay_holders.items():
+        if len(holders) > 1:
+            conflicts.append(
+                "bay %s assigned to multiple batches in this order: %s"
+                % (bay, ", ".join(str(holder) for holder in holders))
+            )
+    for consignment_id, bays in consignment_bays.items():
+        if len(bays) > 1:
+            conflicts.append(
+                "consignment %s assigned to multiple bays in this order: %s"
+                % (consignment_id, ", ".join(str(bay) for bay in bays))
+            )
+    active_orders = lookup("isolation_order", "status", "active") if lookup else []
+    for order in active_orders or []:
+        for existing in order.get("data", {}).get("items", []):
+            if existing.get("state") != "isolating":
+                continue
+            for item in normalized:
+                if existing.get("bay") == item["bay"]:
+                    conflicts.append(
+                        "bay %s already occupied by consignment %s (order %s); "
+                        "conflicting batch: %s"
+                        % (
+                            item["bay"],
+                            existing.get("consignment_id"),
+                            order.get("id"),
+                            item["consignment_id"],
+                        )
+                    )
+                if existing.get("consignment_id") == item["consignment_id"]:
+                    conflicts.append(
+                        "consignment %s already isolating in order %s"
+                        % (item["consignment_id"], order.get("id"))
+                    )
+    if conflicts:
+        raise ConflictError("; ".join(conflicts))
+    return {"items": normalized}
+
+
+def _recheck_isolation_order(actor, entity, data, lookup):
+    consignment_id = data.get("consignment_id")
+    if data.get("passed") is None:
+        raise ValidationError("missing required field: passed")
+    passed = bool(data.get("passed"))
+    items = [dict(item) for item in entity["data"].get("items", [])]
+    target = None
+    for item in items:
+        if item.get("consignment_id") == consignment_id and item.get("state") == "isolating":
+            target = item
+            break
+    if target is None:
+        raise ValidationError(
+            "no pending recheck item for consignment: " + str(consignment_id)
+        )
+    target["state"] = "released" if passed else "returned"
+    target["recheck_result"] = "passed" if passed else "failed"
+    target["rechecked_by"] = actor.user_id
+    next_status = "closed" if all(
+        item.get("state") != "isolating" for item in items
+    ) else "active"
+    patch = {
+        "items": items,
+        "last_recheck": {
+            "consignment_id": consignment_id,
+            "passed": passed,
+            "rechecked_by": actor.user_id,
+        },
+    }
+    return next_status, patch
+
+
 def trace_downstream(consignments, start_id):
     pending = [start_id]
     visited = set()
@@ -43,17 +148,17 @@ def trace_downstream(consignments, start_id):
     return result
 
 
-CUSTOM_CREATE = {'consignment': _validate_consignment}
-CUSTOM_TRANSITIONS = {('consignment', 'quarantine'): _validate_quarantine, ('consignment', 'release'): _validate_release}
+CUSTOM_CREATE = {'consignment': _validate_consignment, 'isolation_order': _validate_isolation_order}
+CUSTOM_TRANSITIONS = {('consignment', 'quarantine'): _validate_quarantine, ('consignment', 'release'): _validate_release, ('isolation_order', 'recheck'): _recheck_isolation_order}
 
 
 class RuleEngine:
-    ALIASES = {'consignments': 'consignment', 'facilities': 'facility'}
-    INITIAL_STATUS = {'consignment': 'declared', 'facility': 'registered'}
-    TRANSITIONS = {'consignment': {'inspect': (('declared',), 'inspected'), 'quarantine': (('inspected',), 'quarantined'), 'release': (('inspected',), 'released'), 'destroy': (('quarantined',), 'destroyed'), 'recheck': (('quarantined',), 'inspected')}, 'facility': {'trace': (('registered',), 'traced')}}
-    CREATE_REQUIRED = {'consignment': ('code', 'origin', 'destination'), 'facility': ('name', 'address')}
-    ACTION_REQUIRED = {('consignment', 'inspect'): ('inspector', 'inspection_result'), ('consignment', 'quarantine'): ('pest_found', 'sample_id'), ('consignment', 'release'): ('pest_found', 'treatment'), ('consignment', 'destroy'): ('method', 'witnessed_by'), ('consignment', 'recheck'): ('sample_id',), ('facility', 'trace'): ('consignment_ids',)}
-    CREATE_ROLES = {'consignment': ('admin', 'inspector'), 'facility': ('admin', 'quarantine')}
+    ALIASES = {'consignments': 'consignment', 'facilities': 'facility', 'isolation_orders': 'isolation_order'}
+    INITIAL_STATUS = {'consignment': 'declared', 'facility': 'registered', 'isolation_order': 'active'}
+    TRANSITIONS = {'consignment': {'inspect': (('declared',), 'inspected'), 'quarantine': (('inspected',), 'quarantined'), 'release': (('inspected',), 'released'), 'destroy': (('quarantined',), 'destroyed'), 'recheck': (('quarantined',), 'inspected')}, 'facility': {'trace': (('registered',), 'traced')}, 'isolation_order': {'recheck': (('active',), 'active')}}
+    CREATE_REQUIRED = {'consignment': ('code', 'origin', 'destination'), 'facility': ('name', 'address'), 'isolation_order': ('items',)}
+    ACTION_REQUIRED = {('consignment', 'inspect'): ('inspector', 'inspection_result'), ('consignment', 'quarantine'): ('pest_found', 'sample_id'), ('consignment', 'release'): ('pest_found', 'treatment'), ('consignment', 'destroy'): ('method', 'witnessed_by'), ('consignment', 'recheck'): ('sample_id',), ('facility', 'trace'): ('consignment_ids',), ('isolation_order', 'recheck'): ('consignment_id', 'passed')}
+    CREATE_ROLES = {'consignment': ('admin', 'inspector'), 'facility': ('admin', 'quarantine'), 'isolation_order': ('admin',)}
     ROLE_ACTIONS = {'inspect': ('admin', 'inspector'), 'quarantine': ('admin', 'quarantine'), 'release': ('admin', 'quarantine'), 'destroy': ('admin', 'quarantine'), 'recheck': ('admin', 'inspector'), 'trace': ('admin', 'quarantine')}
 
     def normalize_kind(self, kind):
@@ -85,7 +190,9 @@ class RuleEngine:
         self._require(data, self.CREATE_REQUIRED.get(kind, ()))
         custom = CUSTOM_CREATE.get(kind)
         if custom:
-            custom(actor, data, lookup)
+            extra = custom(actor, data, lookup)
+            if extra:
+                data.update(extra)
         return dict(data)
 
     def validate_transition(self, actor, entity, action, data, lookup=None):
@@ -104,10 +211,12 @@ class RuleEngine:
         self._ensure_role(actor, allowed_roles)
         self._require(data, self.ACTION_REQUIRED.get((kind, action), ()))
         custom = CUSTOM_TRANSITIONS.get((kind, action))
-        extra = custom(actor, entity, data, lookup) if custom else {}
+        result = custom(actor, entity, data, lookup) if custom else None
+        if isinstance(result, tuple):
+            return result
         patch = dict(data)
-        if extra:
-            patch.update(extra)
+        if result:
+            patch.update(result)
         return next_status, patch
 
 

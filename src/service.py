@@ -71,3 +71,56 @@ class DomainService:
 
     def audit_log(self, entity_id=None):
         return self.repository.list_audit(entity_id=entity_id)
+
+    def isolation_dashboard(self):
+        orders = self.repository.list_entities(kind="isolation_order")
+        consignments = self.repository.list_entities(kind="consignment")
+        bays = {}
+        pending_recheck = 0
+        latest_item_state = {}
+        for order in orders:
+            for item in order["data"].get("items", []):
+                slot = bays.setdefault(
+                    item.get("bay"),
+                    {
+                        "bay": item.get("bay"),
+                        "occupied": False,
+                        "consignment_id": None,
+                        "order_id": None,
+                        "recheck_date": None,
+                    },
+                )
+                latest_item_state[item.get("consignment_id")] = item.get("state")
+                if item.get("state") == "isolating":
+                    pending_recheck += 1
+                    slot.update(
+                        {
+                            "occupied": True,
+                            "consignment_id": item.get("consignment_id"),
+                            "order_id": order["id"],
+                            "recheck_date": item.get("recheck_date"),
+                        }
+                    )
+        pending_disposal = [
+            {"id": consignment["id"], "code": consignment["data"].get("code")}
+            for consignment in consignments
+            if consignment["status"] == "quarantined"
+            and latest_item_state.get(consignment["id"]) in (None, "returned")
+        ]
+        records = [
+            {
+                "id": order["id"],
+                "status": order["status"],
+                "created_by": order["created_by"],
+                "created_at": order["created_at"],
+                "items": order["data"].get("items", []),
+            }
+            for order in orders
+        ]
+        return {
+            "bays": sorted(bays.values(), key=lambda slot: str(slot["bay"])),
+            "pending_recheck_count": pending_recheck,
+            "pending_disposal": pending_disposal,
+            "pending_disposal_count": len(pending_disposal),
+            "records": records,
+        }

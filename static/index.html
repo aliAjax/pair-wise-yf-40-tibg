@@ -6,9 +6,16 @@
   <title>植物病虫害检疫与传播追溯</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #1f2937; }
-    main { max-width: 820px; margin: auto; }
+    main { max-width: 860px; margin: auto; }
     pre { background: #f3f4f6; padding: 1rem; border-radius: 8px; overflow-x: auto; }
     button { padding: .5rem .8rem; cursor: pointer; }
+    table { border-collapse: collapse; width: 100%; margin: .5rem 0 1.5rem; }
+    th, td { border: 1px solid #d1d5db; padding: .4rem .6rem; text-align: left; font-size: .9rem; }
+    th { background: #f3f4f6; }
+    .badge { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .8rem; }
+    .occupied { background: #fee2e2; color: #b91c1c; }
+    .free { background: #dcfce7; color: #15803d; }
+    #summary { margin-left: .8rem; font-weight: 600; }
   </style>
 </head>
 <body>
@@ -17,18 +24,105 @@
   <p>这是最小演示页面。使用浏览器或 curl 调用 JSON API。</p>
   <p><button onclick="checkHealth()">检查服务状态</button></p>
   <pre id="result">等待操作</pre>
+
+  <h2>隔离处置看板</h2>
+  <p>
+    <button onclick="loadDashboard()">刷新看板</button>
+    <span id="summary"></span>
+  </p>
+  <h3>棚位占用</h3>
+  <table id="bays">
+    <thead><tr><th>棚位</th><th>状态</th><th>占用批次</th><th>复查日期</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <h3>处置记录</h3>
+  <div id="records"></div>
+
   <h2>常用接口</h2>
   <pre>GET  /health
 GET  /api/&lt;kind&gt;
 POST /api/&lt;kind&gt;
 GET  /api/entities/&lt;id&gt;
-POST /api/entities/&lt;id&gt;/actions</pre>
+POST /api/entities/&lt;id&gt;/actions
+GET  /api/isolation/dashboard</pre>
 </main>
 <script>
+const ITEM_STATE_LABELS = {
+  isolating: '隔离中（待复查）',
+  released: '复查合格·棚位已释放',
+  returned: '复查不合格·退回待处置'
+};
+const ORDER_STATUS_LABELS = { active: '处置中', closed: '已结案' };
+
 async function checkHealth() {
   const response = await fetch('/health');
   document.getElementById('result').textContent = JSON.stringify(await response.json(), null, 2);
 }
+
+function cell(row, text) {
+  const td = document.createElement('td');
+  td.textContent = text == null ? '—' : text;
+  row.appendChild(td);
+  return td;
+}
+
+async function loadDashboard() {
+  const response = await fetch('/api/isolation/dashboard');
+  const data = await response.json();
+  const pending = data.pending_disposal.map(item => item.code || item.id).join('、') || '无';
+  document.getElementById('summary').textContent =
+    '待复查 ' + data.pending_recheck_count + ' 批；待处置 ' + data.pending_disposal_count + ' 批：' + pending;
+
+  const baysBody = document.querySelector('#bays tbody');
+  baysBody.textContent = '';
+  if (!data.bays.length) {
+    const row = document.createElement('tr');
+    cell(row, '暂无棚位记录').colSpan = 4;
+    baysBody.appendChild(row);
+  }
+  for (const slot of data.bays) {
+    const row = document.createElement('tr');
+    cell(row, slot.bay);
+    const state = cell(row, slot.occupied ? '占用' : '空闲');
+    state.className = 'badge ' + (slot.occupied ? 'occupied' : 'free');
+    cell(row, slot.occupied ? slot.consignment_id : '—');
+    cell(row, slot.occupied ? slot.recheck_date : '—');
+    baysBody.appendChild(row);
+  }
+
+  const records = document.getElementById('records');
+  records.textContent = '';
+  if (!data.records.length) {
+    records.textContent = '暂无处置记录';
+  }
+  for (const order of data.records) {
+    const title = document.createElement('p');
+    title.textContent = '处置单 ' + order.id.slice(0, 8) + '… · '
+      + (ORDER_STATUS_LABELS[order.status] || order.status)
+      + ' · 登记人 ' + order.created_by + ' · ' + order.created_at;
+    records.appendChild(title);
+    const table = document.createElement('table');
+    const head = document.createElement('tr');
+    for (const label of ['批次', '棚位', '消杀方式', '复查日期', '状态']) {
+      const th = document.createElement('th');
+      th.textContent = label;
+      head.appendChild(th);
+    }
+    table.appendChild(head);
+    for (const item of order.items) {
+      const row = document.createElement('tr');
+      cell(row, item.consignment_id);
+      cell(row, item.bay);
+      cell(row, item.disinfection);
+      cell(row, item.recheck_date);
+      cell(row, ITEM_STATE_LABELS[item.state] || item.state);
+      table.appendChild(row);
+    }
+    records.appendChild(table);
+  }
+}
+
+loadDashboard();
 </script>
 </body>
 </html>

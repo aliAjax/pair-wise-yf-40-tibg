@@ -104,11 +104,14 @@ class SQLiteRepository:
         return [self._entity_from_row(row) for row in rows]
 
     def find_entities(self, kind, field, value):
-        return [
-            entity
-            for entity in self.list_entities(kind=kind)
-            if (entity["id"] == value if field == "id" else entity["data"].get(field) == value)
-        ]
+        def matches(entity):
+            if field == "id":
+                return entity["id"] == value
+            if field == "status":
+                return entity["status"] == value
+            return entity["data"].get(field) == value
+
+        return [entity for entity in self.list_entities(kind=kind) if matches(entity)]
 
     def update_entity(self, entity_id, expected_version, status, data):
         now = utcnow()
